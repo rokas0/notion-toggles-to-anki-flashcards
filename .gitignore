@@ -1,0 +1,10 @@
+# Anki-managed, contains your tokens
+meta.json
+# Debug log, may contain note text
+log.txt
+# Per-user sync state
+user_files/
+__pycache__/
+.venv/
+.pytest_cache/
+dist/

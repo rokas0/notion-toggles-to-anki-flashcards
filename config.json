@@ -1,0 +1,16 @@
+{
+  "debug": false,
+  "sync_every_minutes": 30,
+  "skip_unchanged_pages": false,
+  "timezone": "",
+  "notion_token": "",
+  "file_token": "",
+  "notion_namespace": "",
+  "notion_pages": [
+    {
+      "page_id": "<32_char_page_id>",
+      "recursive": true,
+      "target_deck": "Notion"
+    }
+  ]
+}

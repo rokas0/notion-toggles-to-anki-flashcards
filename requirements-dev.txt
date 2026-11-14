@@ -1,0 +1,5 @@
+# Runtime deps are bundled with Anki; these are only for tests and builds
+beautifulsoup4
+jsonschema
+pytest
+requests
