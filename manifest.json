@@ -1,4 +1,7 @@
 {
   "package": "notion_toggles_to_flashcards",
-  "name": "Notion Toggles to Flashcards"
+  "name": "Notion Toggles to Flashcards",
+  "min_point_version": 50,
+  "human_version": "1.0.0",
+  "homepage": "https://github.com/rokas0/notion-toggles-to-anki-flashcards"
 }

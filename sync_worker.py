@@ -39,6 +39,8 @@ class PageJob:
     subdecks: bool = False
     #: `last_edited_time` fetched before export (for incremental sync)
     last_edited: Optional[int] = None
+    #: Notion workspace of the page (needed to route task requests)
+    space_id: Optional[str] = None
 
 
 class SyncSignals(QObject):
@@ -148,6 +150,16 @@ class SyncWorker(QRunnable):
                 remaining.append(job)
         return remaining
 
+    def _extract(self, archive: Path, destination: Path) -> None:
+        """Extract a zip, skipping entries the file system can't hold."""
+        with zipfile.ZipFile(archive) as zip_file:
+            for member in zip_file.infolist():
+                try:
+                    zip_file.extract(member, destination)
+                except OSError as exc:
+                    # e.g. file names too long for the file system
+                    self.logger.warning('Skipping %s: %s', member.filename, exc)
+
     def _process_export(self, job: PageJob, url: str) -> None:
         """Download, unzip and parse one export, then emit its notes."""
         assert self.client
@@ -155,15 +167,16 @@ class SyncWorker(QRunnable):
             tmp_path = safe_path(Path(tmp_dir))
             archive = tmp_path / 'export.zip'
             self.client.download(url, archive)
-            with zipfile.ZipFile(archive) as zip_file:
-                for member in zip_file.infolist():
-                    try:
-                        zip_file.extract(member, tmp_path)
-                    except OSError as exc:
-                        # e.g. file names too long for the file system
-                        self.logger.warning(
-                            'Skipping %s: %s', member.filename, exc
-                        )
+            self._extract(archive, tmp_path)
+            archive.unlink()
+            # Large exports come split into parts: zips inside the zip
+            for _ in range(3):
+                inner = list(tmp_path.rglob('*.zip'))
+                if not inner:
+                    break
+                for part in inner:
+                    self._extract(part, part.parent)
+                    part.unlink()
             html_paths = sorted(tmp_path.rglob('*.html'))
             # The page itself is the shallowest file; subpages sit in folders
             # named after their parent pages
@@ -234,8 +247,10 @@ class SyncWorker(QRunnable):
             while pending and len(in_flight) < self.max_in_flight:
                 job = pending[0]
                 try:
+                    if job.space_id is None:
+                        job.space_id = self.client.get_space_id(job.page_id)
                     task_id = self.client.enqueue_export_task(
-                        job.page_id, job.recursive, self.timezone
+                        job.page_id, job.recursive, self.timezone, job.space_id
                     )
                 except RateLimited as exc:
                     enqueue_rate_limits += 1
@@ -271,7 +286,13 @@ class SyncWorker(QRunnable):
             if self.cancelled:
                 break
             try:
-                tasks = self.client.get_tasks(in_flight.keys())
+                # One request per workspace (almost always just one)
+                by_space: Dict[Optional[str], List[str]] = defaultdict(list)
+                for task_id, (job, _) in in_flight.items():
+                    by_space[job.space_id].append(task_id)
+                tasks: Dict[str, Dict] = {}
+                for space_id, task_ids in by_space.items():
+                    tasks.update(self.client.get_tasks(task_ids, space_id))
             except RateLimited as exc:
                 wait = exc.wait or rate_limit_wait
                 self.logger.warning('Rate limited on poll, waiting %.0fs', wait)

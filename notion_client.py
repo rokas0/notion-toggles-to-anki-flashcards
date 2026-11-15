@@ -75,6 +75,52 @@ class NotionClient:
         self.file_token = file_token
         self.session = requests.Session()
         self.session.cookies.update({'token_v2': token})
+        #: Notion user id, sent as `x-notion-active-user-header`
+        self._user_id: Optional[str] = None
+        #: page id -> workspace (space) id
+        self._space_ids: Dict[str, str] = {}
+
+    def _identity_headers(self, space_id: Optional[str]) -> Dict[str, str]:
+        """Headers Notion now needs to route task requests.
+
+        Without them (since ~Nov 2026) export tasks are accepted but
+        `getTasks` can't find them: they stay "not_started" forever.
+        """
+        if self._user_id is None:
+            data = self._post('loadUserContent', {}, identify=False)
+            users = (data.get('recordMap') or {}).get('notion_user') or {}
+            if not users:
+                raise AuthError('notion_token')
+            self._user_id = next(iter(users))
+        headers = {'x-notion-active-user-header': self._user_id}
+        if space_id:
+            headers['x-notion-space-id'] = space_id
+        return headers
+
+    def get_space_id(self, page_id: str) -> Optional[str]:
+        """Workspace id of a page (cached)."""
+        if page_id not in self._space_ids:
+            record = self._get_block(page_id)
+            value = record.get('value') or {}
+            if isinstance(value.get('value'), dict):
+                value = value['value']
+            space_id = record.get('spaceId') or value.get('space_id')
+            if not space_id:
+                raise NotionClientError(
+                    f'Page {page_id} not found: check the page id and that '
+                    f'your Notion account can open it'
+                )
+            self._space_ids[page_id] = space_id
+        return self._space_ids[page_id]
+
+    def _get_block(self, block_id: str) -> Dict[str, Any]:
+        data = self._post('syncRecordValues', {
+            'requests': [{
+                'pointer': {'table': 'block', 'id': block_id},
+                'version': -1,
+            }]
+        }, identify=False)
+        return data.get('recordMap', {}).get('block', {}).get(block_id) or {}
 
     @staticmethod
     def _retry_after(resp: requests.Response) -> Optional[float]:
@@ -92,8 +138,17 @@ class NotionClient:
             or (data.get('clientData') or {}).get('type') == 'rate_limited'
         )
 
-    def _post(self, endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _post(
+        self,
+        endpoint: str,
+        payload: Dict[str, Any],
+        space_id: Optional[str] = None,
+        identify: bool = True,
+    ) -> Dict[str, Any]:
         """POST to the v3 API and return decoded JSON.
+
+        :param space_id: workspace the request is about (routing header)
+        :param identify: send the user/workspace routing headers
 
         :raises RateLimited: on HTTP 429 or a rate-limit error body
         :raises NotionClientError: on auth, network or decoding errors
@@ -103,6 +158,9 @@ class NotionClient:
                 resp = self.session.post(
                     f'{self.API}/{endpoint}',
                     json=payload,
+                    headers=(
+                        self._identity_headers(space_id) if identify else None
+                    ),
                     timeout=self.REQUEST_TIMEOUT,
                 )
             except CONNECTION_EXCEPTIONS as exc:
@@ -131,7 +189,11 @@ class NotionClient:
         raise NotionClientError(f'Notion server errors on {endpoint}')
 
     def enqueue_export_task(
-        self, page_id: str, recursive: bool, timezone: str
+        self,
+        page_id: str,
+        recursive: bool,
+        timezone: str,
+        space_id: Optional[str] = None,
     ) -> str:
         """Start an HTML export of a page.
 
@@ -141,7 +203,7 @@ class NotionClient:
             'task': {
                 'eventName': 'exportBlock',
                 'request': {
-                    'block': {'id': page_id},
+                    'block': {'id': page_id, **({'spaceId': space_id} if space_id else {})},
                     'recursive': recursive,
                     'exportOptions': {
                         'exportType': 'html',
@@ -150,7 +212,7 @@ class NotionClient:
                     },
                 },
             }
-        })
+        }, space_id)
         if 'taskId' not in data:
             raise NotionClientError(f'No task id in response: {data}')
         self.logger.info(
@@ -159,12 +221,14 @@ class NotionClient:
         )
         return data['taskId']
 
-    def get_tasks(self, task_ids: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+    def get_tasks(
+        self, task_ids: Iterable[str], space_id: Optional[str] = None
+    ) -> Dict[str, Dict[str, Any]]:
         """Fetch the status of several tasks in a single request.
 
         :returns: task id -> raw task result
         """
-        data = self._post('getTasks', {'taskIds': list(task_ids)})
+        data = self._post('getTasks', {'taskIds': list(task_ids)}, space_id)
         self.logger.debug('getTasks response: %s', data)
         return {r['id']: r for r in data.get('results', []) if 'id' in r}
 
@@ -205,15 +269,7 @@ class NotionClient:
 
     def get_last_edited(self, page_id: str) -> Optional[int]:
         """Page `last_edited_time` (ms since epoch), None if unavailable."""
-        data = self._post('syncRecordValues', {
-            'requests': [{
-                'pointer': {'table': 'block', 'id': page_id},
-                'version': -1,
-            }]
-        })
-        record = (
-            data.get('recordMap', {}).get('block', {}).get(page_id) or {}
-        )
+        record = self._get_block(page_id)
         value = record.get('value') or {}
         # Newer responses nest the record one level deeper
         if isinstance(value.get('value'), dict):

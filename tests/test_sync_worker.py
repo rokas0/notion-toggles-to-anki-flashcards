@@ -21,13 +21,16 @@ class FakeClient:
         self.polls: List[List[str]] = []
         self.task_page: Dict[str, str] = {}
 
-    def enqueue_export_task(self, page_id, recursive, timezone):
+    def get_space_id(self, page_id):
+        return 'space-1'
+
+    def enqueue_export_task(self, page_id, recursive, timezone, space_id=None):
         task_id = f'task-{page_id}'
         self.enqueued.append(page_id)
         self.task_page[task_id] = page_id
         return task_id
 
-    def get_tasks(self, task_ids):
+    def get_tasks(self, task_ids, space_id=None):
         if self.rate_limit_polls:
             self.rate_limit_polls -= 1
             raise RateLimited(1)
@@ -250,3 +253,51 @@ def test_expired_token_stops_whole_sync():
     assert worker.signals.auth_failed.calls == [('notion_token',)]
     assert worker.signals.finished.calls == [()]
     assert not worker.signals.error.calls               # no per-page noise
+
+
+# -- Notion routing and split exports ------------------------------------------
+
+
+def test_tasks_polled_per_workspace():
+    class TwoSpaces(FakeClient):
+        def get_space_id(self, page_id):
+            return 'space-b' if page_id == 'b' else 'space-a'
+
+        def get_tasks(self, task_ids, space_id=None):
+            self.polled_spaces = getattr(self, 'polled_spaces', []) + [space_id]
+            return super().get_tasks(task_ids, space_id)
+
+    client = TwoSpaces({'a': 1, 'b': 1, 'c': 1})
+    worker = make_worker(client, jobs('a', 'b', 'c'))
+    worker._run()
+    assert sorted(client.polled_spaces) == ['space-a', 'space-b']
+    assert len(worker.processed) == 3
+
+
+def test_split_export_with_inner_zips():
+    import io
+
+    def zipped(files):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as zf:
+            for name, body in files.items():
+                zf.writestr(name, body)
+        return buf.getvalue()
+
+    parts = {
+        'Export-Part-1.zip': zipped({f'Root {ID1}.html': _toggle_page('root q')}),
+        'Export-Part-2.zip': zipped({f'Root {ID1}/Sub {ID2}.html': _toggle_page('sub q')}),
+    }
+
+    class SplitClient(ExportClient):
+        def download(self, url, destination):
+            with zipfile.ZipFile(destination, 'w') as zf:
+                for name, body in parts.items():
+                    zf.writestr(name, body)
+
+    worker = make_worker(SplitClient({}), [
+        PageJob(page_id='p', deck='AWS', recursive=True, subdecks=True)])
+    del worker._process_export
+    worker._run()
+    got = {deck: [n.front for n in notes] for deck, _, notes in worker.signals.result.calls}
+    assert got == {'AWS': ['root q'], 'AWS::Sub': ['sub q']}
