@@ -16,13 +16,10 @@ jobs:
       matrix:
         # 3.9: older Anki releases; 3.13: current Anki
         python-version: ['3.9', '3.13']
+    # Official Python images: setup-python no longer ships 3.9 for new runners
+    container: python:${{ matrix.python-version }}-slim
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
       - run: pytest -q
 
