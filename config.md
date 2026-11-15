@@ -15,6 +15,7 @@
   - `recursive`: if `true`, subpages are included.
   - `subdecks`: if `true` (with `recursive`), each subpage's notes go into a subdeck named after it, e.g. `AWS::IAM::Policies`. Existing cards are moved there and keep their history. If you turn it off again, cards already in subdecks stay where they are and keep syncing.
   - `target_deck`: deck to put the notes in. Use `::` for subdecks (e.g. `"Languages::English"`). Several pages may share a deck.
+    An existing deck is found by its name alone, wherever it is: `"awssap2a"` (or an outdated `"Daily::awssap2a"`) uses `Daily::AWS::awssap2a`, so you can move decks around without editing the config. Only when no deck has that name is it created at the configured path. If several decks share the name, you're asked once which one to use; the add-on then remembers the deck itself and follows it through later moves and renames (until you change `target_deck`).
 
 ## Notion token
 

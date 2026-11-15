@@ -5,6 +5,7 @@ Syncs toggle blocks from Notion pages into Anki notes.
 
 import json
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, cast
 
@@ -14,8 +15,9 @@ from aqt.utils import showCritical, showInfo
 from jsonschema import ValidationError, validate
 from PyQt6.QtCore import QObject, QThreadPool, QTimer
 from PyQt6.QtGui import QAction
-from PyQt6.QtWidgets import QMenu, QMessageBox
+from PyQt6.QtWidgets import QInputDialog, QMenu, QMessageBox
 
+from .decks import deck_candidates, deck_leaf
 from .helpers import (
     BASE_DIR,
     USER_FILES_DIR,
@@ -28,7 +30,8 @@ from .notes_manager import REMOVED_TAG, NotesManager
 from .parser import AnkiNote
 from .sync_worker import PageJob, SyncWorker
 
-#: Where `last_edited_time` of every successfully synced page is kept
+#: `last_edited_time` of every successfully synced page, and the deck each
+#: page syncs into (see `_resolve_decks`)
 STATE_FILE = USER_FILES_DIR / "sync_state.json"
 #: Config keys that must never be written to the log
 SECRET_KEYS = ("notion_token", "file_token")
@@ -87,6 +90,8 @@ class NotionSyncPlugin(QObject):
         self.notes_managers: Dict[str, NotesManager] = {}
         self.thread_pool = QThreadPool()
         self._worker: Optional[SyncWorker] = None
+        #: A sync is being set up (and may be asking which deck to use)
+        self._preparing = False
         self._is_auto_sync = True
         self._remove_obsolete_on_sync = False
         # Per-sync state, see `_reset_stats`
@@ -187,24 +192,32 @@ class NotionSyncPlugin(QObject):
 
     # -- persisted state --------------------------------------------------
 
-    def _load_state(self) -> Dict[str, int]:
+    def _read_state_file(self) -> Dict[str, Any]:
         try:
-            return json.loads(STATE_FILE.read_text("utf8")).get("last_edited", {})
+            data = json.loads(STATE_FILE.read_text("utf8"))
         except (OSError, ValueError):
             return {}
+        return data if isinstance(data, dict) else {}
+
+    def _write_state_file(self, data: Dict[str, Any]) -> None:
+        try:
+            USER_FILES_DIR.mkdir(exist_ok=True)
+            STATE_FILE.write_text(json.dumps(data), "utf8")
+        except OSError as exc:
+            self.logger.warning("Cannot save sync state: %s", exc)
+
+    def _load_state(self) -> Dict[str, int]:
+        return self._read_state_file().get("last_edited", {})
 
     def _save_state(self, versions: Dict[str, Optional[int]]) -> None:
-        state = self._load_state()
+        data = self._read_state_file()
+        state = data.setdefault("last_edited", {})
         for page_id, edited in versions.items():
             if edited is None:
                 state.pop(page_id, None)
             else:
                 state[page_id] = edited
-        try:
-            USER_FILES_DIR.mkdir(exist_ok=True)
-            STATE_FILE.write_text(json.dumps({"last_edited": state}), "utf8")
-        except OSError as exc:
-            self.logger.warning("Cannot save sync state: %s", exc)
+        self._write_state_file(data)
 
     # -- menu / entry points ----------------------------------------------
 
@@ -233,7 +246,7 @@ class NotionSyncPlugin(QObject):
 
     def auto_sync(self) -> None:
         """Background sync (timer / startup); silent unless debugging."""
-        if self._worker:
+        if self._worker or self._preparing:
             self.logger.info("Auto sync skipped: sync already in progress")
             return
         self.logger.info("Auto sync started")
@@ -247,7 +260,7 @@ class NotionSyncPlugin(QObject):
 
         :param remove_obsolete: offer to delete notes missing from Notion
         """
-        if self._worker:
+        if self._worker or self._preparing:
             showInfo(
                 "Sync is already in progress, please wait",
                 title=ADDON_NAME,
@@ -285,6 +298,74 @@ class NotionSyncPlugin(QObject):
                 collection=mw.col, deck_name=deck, debug=self.debug
             )
         return nm
+
+    def _resolve_decks(self, jobs: List[PageJob]) -> Optional[List[PageJob]]:
+        """Point every page at the deck it should sync into.
+
+        `target_deck` is matched by its last name part, so a deck the user
+        moved under another parent (`Daily::x` -> `Daily::AWS::x`) is still
+        used, and a bare `x` is enough in the config. If several decks share
+        that name, the user picks one. A page remembers its deck by id (as
+        long as its `target_deck` stays the same), so it is asked only once
+        and later moves and renames are followed too.
+
+        :returns: jobs with resolved decks, or None if the user cancelled
+        """
+        assert mw and mw.col
+        decks = [
+            (d.name, d.id)
+            for d in mw.col.decks.all_names_and_ids(include_filtered=False)
+        ]
+        names_by_id = {deck_id: name for name, deck_id in decks}
+        data = self._read_state_file()
+        remembered: Dict[str, Dict[str, Any]] = data.setdefault("decks", {})
+        #: Answers in this run, so pages sharing a target are asked once
+        chosen: Dict[str, str] = {}
+        resolved = []
+        for job in jobs:
+            target = job.deck
+            entry = remembered.get(job.page_id) or {}
+            if entry.get("target") == target and entry.get("deck_id") in names_by_id:
+                deck = names_by_id[entry["deck_id"]]
+            elif target.casefold() in chosen:
+                deck = chosen[target.casefold()]
+            else:
+                names = [name for name, _ in deck_candidates(target, decks)]
+                if not names:
+                    deck = target  # created below
+                elif len(names) == 1:
+                    deck = names[0]
+                else:
+                    picked = self._ask_deck(target, names)
+                    if picked is None:
+                        self.logger.info("Deck choice for %s cancelled", target)
+                        return None
+                    deck = picked
+                chosen[target.casefold()] = deck
+            if deck != target:
+                self.logger.info(
+                    "Page %s: target_deck %r is deck %r", job.page_id, target, deck
+                )
+            deck_id = mw.col.decks.id(deck, create=True)
+            remembered[job.page_id] = {"target": target, "deck_id": deck_id}
+            resolved.append(replace(job, deck=deck))
+        self._write_state_file(data)
+        return resolved
+
+    def _ask_deck(self, target: str, names: List[str]) -> Optional[str]:
+        """Ask which of several same-named decks a page syncs into."""
+        assert mw
+        name, ok = QInputDialog.getItem(
+            mw,
+            ADDON_NAME,
+            f"Several decks are named \u201c{deck_leaf(target)}\u201d.\n"
+            f"Which one should target_deck \u201c{target}\u201d sync into?\n\n"
+            "Your choice is remembered.",
+            names,
+            0,
+            False,
+        )
+        return name if ok and name in names else None
 
     def _ensure_notes_managers(self, jobs: List[PageJob]) -> None:
         """Create managers for every page's deck and its existing subdecks.
@@ -341,7 +422,12 @@ class NotionSyncPlugin(QObject):
         if not jobs:
             self.logger.info("No pages configured")
             return
+        self._preparing = True
         try:
+            resolved = self._resolve_decks(jobs)
+            if resolved is None:
+                return
+            jobs = resolved
             self._ensure_notes_managers(jobs)
             self._reset_stats()
         except Exception as exc:
@@ -349,6 +435,8 @@ class NotionSyncPlugin(QObject):
             if not self._is_auto_sync:
                 showCritical(str(exc), title=f"{ADDON_NAME}: sync error")
             return
+        finally:
+            self._preparing = False
 
         # Skipping unchanged pages is for background syncs only: a manual
         # sync is what the user reaches for when something looks stale

@@ -29,7 +29,7 @@
         "target_deck": {
           "type": "string",
           "title": "Target deck",
-          "description": "The target deck is a string attribute that specifies the name of the deck where loaded notes will be added. Use '::' to create subdecks (e.g. 'Languages::English'). If multiple page_ids refer to the same target_deck, their corresponding notes will be combined and added to the same target_deck.",
+          "description": "The target deck is a string attribute that specifies the name of the deck where loaded notes will be added. Use '::' to create subdecks (e.g. 'Languages::English'). An existing deck is found by its last name part wherever it is, so a moved deck keeps being used; if several decks share the name you are asked once which one. If multiple page_ids refer to the same target_deck, their corresponding notes will be combined and added to the same target_deck.",
           "default": "",
           "examples": [
             "math",
