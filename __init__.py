@@ -32,7 +32,7 @@ from .sync_worker import PageJob, SyncWorker
 STATE_FILE = USER_FILES_DIR / "sync_state.json"
 #: Config keys that must never be written to the log
 SECRET_KEYS = ("notion_token", "file_token")
-MENU_TITLE = "Notion Toggles to Flashcards"
+MENU_TITLE = "📇 Notion Toggles to Flashcards"
 ADDON_NAME = "Notion Toggles to Flashcards"
 #: Most questions listed in the "remove deleted notes" confirmation
 MAX_LISTED_REMOVALS = 200

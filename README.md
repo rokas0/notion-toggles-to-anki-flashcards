@@ -1,4 +1,4 @@
-# Notion Toggles to Flashcards
+# 📇 Notion Toggles to Flashcards
 
 **An Anki add-on that turns the toggle blocks in your Notion pages into
 flashcards and keeps them in sync.** The toggle's title is the front of the
@@ -25,7 +25,7 @@ stay up to date.
    `notion_toggles_to_flashcards`. To find the add-ons folder, open Anki and go to
    **Tools > Add-ons > View Files**.
 2. Restart Anki.
-3. Go to **Tools > Add-ons > Notion Toggles to Flashcards > Config** and fill in your tokens and pages (see below).
+3. Go to **Tools > Add-ons > 📇 Notion Toggles to Flashcards > Config** and fill in your tokens and pages (see below).
 
 ## Configuration
 
@@ -49,8 +49,8 @@ All options, and how to get the tokens and page ids, are documented in
 
 ## Usage
 
-- **Tools > Notion Toggles to Flashcards > Sync from Notion**: manual sync.
-- **Tools > Notion Toggles to Flashcards > Sync from Notion and remove deleted notes…**: sync,
+- **Tools > 📇 Notion Toggles to Flashcards > Sync from Notion**: manual sync.
+- **Tools > 📇 Notion Toggles to Flashcards > Sync from Notion and remove deleted notes…**: sync,
   then list the cards whose toggle no longer exists in Notion and offer to suspend them (tagged
   `notion-deleted`) or, with `"remove_mode": "delete"`, delete them. Decks with a failed or
   skipped page are never touched.
